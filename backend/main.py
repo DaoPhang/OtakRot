@@ -6,7 +6,10 @@ from google.generativeai.types import GenerateContentResponse, GenerationConfig
 import traceback
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import stability_sdk.interfaces.gooseai.generation.generation_pb2 as generation
+from stability_sdk import client
 
 app = FastAPI()
 
@@ -35,6 +38,17 @@ if not api_key or "YOUR_API_KEY_HERE" in api_key:
 
 genai.configure(api_key=api_key)
 
+# Configure Stability AI client
+stability_api_key = os.getenv("STABILITY_API_KEY")
+if not stability_api_key:
+    raise ValueError("STABILITY_API_KEY not found in .env file.")
+
+stability_client = client.StabilityInference(
+    key=stability_api_key,
+    verbose=True,
+    engine="stable-diffusion-xl-1024-v1-0",
+)
+
 # Define the system instruction for the model
 system_instruction = (
     "You are OtakRot, a deeply knowledgeable Malaysian meme generator. Your humor is sharp, witty, and hyperlocal. "
@@ -44,9 +58,27 @@ system_instruction = (
     "Keep every caption under 20 words. Be funny, be relatable, be Malaysian."
 )
 
+# Define a new system instruction for a prompt-enhancing model
+image_prompt_enhancer_instruction = (
+    "You are a creative assistant for a deeply knowledgeable Malaysian meme image generator. Your task is to take a simple user prompt "
+    "and expand it into a rich, detailed, and visually descriptive prompt for Stable Diffusion. "
+    "The expanded prompt must describe a vibrant, realistic photograph. It must faithfully include all key elements and concepts from the user's original prompt. "
+    "The scene should have strong meme potential, focusing on exaggerated expressions and relatable situations. "
+    "Describe the setting, the subjects, and the specific actions with high detail. The composition should be dramatic and clear, like a scene from a movie. "
+    "The final prompt should be a single paragraph of descriptive text. Do not add any conversational text. "
+    "The output must be only the prompt itself. For example, if the user says 'A man in a suit shaking hands while hiding a knife behind his back', you should output something like: "
+    "'Cinematic still of two men in sharp business suits shaking hands in a modern, cold office. One man has a warm, trustworthy smile. The other man has a forced, slightly sinister smile, and his other hand, hidden behind his back, firmly grips a sleek, sharp knife. The focus is sharp, capturing the texture of the suits and the glint of the hidden blade. The lighting is dramatic, with deep shadows, creating a tense, suspenseful atmosphere.' "
+)
+
 model = genai.GenerativeModel(
     'gemini-1.5-flash',
     system_instruction=system_instruction
+)
+
+# Create a separate model for enhancing image prompts
+image_prompt_enhancer_model = genai.GenerativeModel(
+    'gemini-1.5-flash',
+    system_instruction=image_prompt_enhancer_instruction
 )
 
 @app.get("/")
@@ -66,39 +98,41 @@ async def generate_text(prompt: TextPrompt):
 @app.post("/generate-image")
 async def generate_image(prompt: TextPrompt):
     try:
-        response: GenerateContentResponse = await genai.GenerativeModel(
-            "gemini-1.5-flash"
-        ).generate_content_async(
-            contents=prompt.prompt,
-            generation_config=GenerationConfig(
-                response_modalities=['TEXT', 'IMAGE']
-            )
+        # 1. Use Gemini to enhance the user's prompt
+        enhancer_response = await image_prompt_enhancer_model.generate_content_async(prompt.prompt)
+        enhanced_prompt = enhancer_response.text.strip()
+
+        print(f"Enhanced Prompt: {enhanced_prompt}") # For debugging
+
+        # 2. Use the enhanced prompt with the Stability AI client
+        answers = stability_client.generate(
+            prompt=enhanced_prompt,
+            style_preset="photographic",
         )
+
+        for resp in answers:
+            for artifact in resp.artifacts:
+                if artifact.finish_reason == generation.FILTER:
+                    return {"error": "The prompt was flagged by the safety filter. Please try a different prompt."}
+                if artifact.type == generation.ARTIFACT_IMAGE:
+                    # Encode the raw image data into a Base64 string for the browser
+                    base64_image = base64.b64encode(artifact.binary).decode("utf-8")
+                    image_url = f"data:image/png;base64,{base64_image}"
+                    return JSONResponse(content={"image_url": image_url})
         
-        image_data = None
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data:
-                    image_data = part.inline_data.data
-                    break
-        
-        if image_data:
-            base64_image = base64.b64encode(image_data).decode("utf-8")
-            image_url = f"data:image/png;base64,{base64_image}"
-            return {"image_url": image_url}
-        else:
-            return {"error": "The AI did not return an image. Please try a different prompt."}
+        # If no image was returned for some reason
+        return JSONResponse(content={"error": "The AI did not return an image."}, status_code=500)
 
     except Exception as e:
-        print("\n--- IMAGE GENERATION ERROR ---")
+        print("\n--- STABILITY AI ERROR ---")
         traceback.print_exc()
-        print("------------------------------\n")
-        return {"error": "Failed to generate image. The model may not be available, or an API error occurred."}
+        print("--------------------------\n")
+        
+        error_message = str(e)
+        if hasattr(e, 'details'):
+            error_message = e.details()
 
-@app.post("/generate-video")
-async def generate_video(prompt: TextPrompt):
-    video_url = "https://videos.pexels.com/video-files/3209828/3209828-hd_1280_720_25fps.mp4"
-    return {"video_url": video_url}
+        return JSONResponse(content={"error": f"Stability AI Error: {error_message}"}, status_code=500)
 
 # All other complex endpoints are temporarily removed to ensure the server starts.
 # We can restore them after this test is successful. 

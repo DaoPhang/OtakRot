@@ -9,11 +9,9 @@ type ImageGeneratorProps = {
 export default function ImageGenerator({ onImageGenerated }: ImageGeneratorProps) {
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
-  const [debugText, setDebugText] = useState('');
 
   const handleGenerate = async () => {
     setLoading(true);
-    setDebugText('');
     try {
       const response = await fetch('http://127.0.0.1:8000/generate-image', {
         method: 'POST',
@@ -21,11 +19,7 @@ export default function ImageGenerator({ onImageGenerated }: ImageGeneratorProps
         body: JSON.stringify({ prompt }),
       });
       
-      console.log('Raw backend response (Image):', response);
       const data = await response.json();
-      console.log('Parsed JSON data (Image):', data);
-
-      setDebugText(JSON.stringify(data, null, 2));
 
       if (data && data.image_url) {
         onImageGenerated(data.image_url);
@@ -38,7 +32,6 @@ export default function ImageGenerator({ onImageGenerated }: ImageGeneratorProps
     } catch (error) {
       console.error('Error in handleGenerate (Image):', error);
       alert('Frontend failed to fetch the image from the backend. Check the browser console (F12) for detailed errors.');
-      setDebugText(`Fetch failed: ${error}`);
     }
     setLoading(false);
   };
@@ -59,13 +52,6 @@ export default function ImageGenerator({ onImageGenerated }: ImageGeneratorProps
       >
         {loading ? 'Generating...' : 'Generate Image'}
       </button>
-      {/* --- DEBUG PANEL --- */}
-      {debugText && (
-        <div className="mt-4 p-2 bg-gray-900 border border-yellow-400 rounded">
-          <h4 className="text-sm font-bold text-yellow-400">Raw Backend Response:</h4>
-          <pre className="text-xs text-white whitespace-pre-wrap">{debugText}</pre>
-        </div>
-      )}
     </div>
   );
 } 
